@@ -177,6 +177,10 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_FISH_SPEECH_BASE_URL = "http://192.168.0.41:8092/v1"
+DEFAULT_FISH_SPEECH_VOICE = "default"
+DEFAULT_FISH_SPEECH_RESPONSE_FORMAT = "wav"
+DEFAULT_FISH_SPEECH_REFERENCE_VOICES_DIR = "~/.hermes/workspace/references_voices"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -202,6 +206,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
     "mistral": 4000,      # conservative; no published per-request cap
     "gemini": 5000,       # Gemini TTS caps at ~8k input tokens / ~655s audio
+    "fish-speech": 5000,  # local vLLM-Omni OpenAI-compatible /v1/audio/speech endpoint
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
@@ -349,6 +354,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "xai",
     "mistral",
     "gemini",
+    "fish-speech",
     "neutts",
     "kittentts",
     "piper",
@@ -1010,6 +1016,144 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         close = getattr(client, "close", None)
         if callable(close):
             close()
+
+
+# ===========================================================================
+# Provider: Fish-Speech (vLLM-Omni OpenAI-compatible TTS)
+# ===========================================================================
+def _fish_speech_response_format(output_path: str, configured: Any = None) -> str:
+    """Return the Fish-Speech response_format to request for an output path."""
+    if configured:
+        fmt = str(configured).strip().lower().lstrip(".")
+        if fmt:
+            return fmt
+    suffix = Path(output_path).suffix.lower().lstrip(".")
+    return suffix or DEFAULT_FISH_SPEECH_RESPONSE_FORMAT
+
+
+def _fish_speech_reference_audio_value(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value)
+    if "://" in text or text.startswith("data:"):
+        return text
+    path = Path(text).expanduser()
+    if path.exists() and path.is_file():
+        import base64
+        import mimetypes
+
+        mime = mimetypes.guess_type(path.name)[0] or "audio/mpeg"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    return str(path)
+
+
+def _fish_speech_reference_text_value(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value)
+    path = Path(text).expanduser()
+    if path.exists() and path.is_file():
+        return path.read_text(encoding="utf-8").strip()
+    return text
+
+
+def _fish_speech_reference_voice_paths(fish_config: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a named Fish-Speech reference voice into audio + transcript paths.
+
+    A reference voice directory is expected to contain ``merged_audio.mp3`` and
+    ``combined.lab``. Explicit ``ref_audio``/``ref_text`` still win so existing
+    configs and URL-based references keep working.
+    """
+    explicit_audio = fish_config.get("ref_audio")
+    explicit_text = fish_config.get("ref_text")
+    if explicit_audio or explicit_text:
+        return (
+            _fish_speech_reference_audio_value(explicit_audio),
+            _fish_speech_reference_text_value(explicit_text),
+        )
+
+    reference_voice = str(
+        fish_config.get("reference_voice")
+        or fish_config.get("voice_reference")
+        or ""
+    ).strip()
+    if not reference_voice:
+        return None, None
+
+    voices_dir = Path(
+        str(
+            fish_config.get("reference_voices_dir")
+            or DEFAULT_FISH_SPEECH_REFERENCE_VOICES_DIR
+        )
+    ).expanduser()
+    voice_dir = voices_dir / reference_voice
+    return (
+        _fish_speech_reference_audio_value(voice_dir / "merged_audio.mp3"),
+        _fish_speech_reference_text_value(voice_dir / "combined.lab"),
+    )
+
+
+def _generate_fish_speech_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using a local Fish-Speech vLLM-Omni server.
+
+    Fish-Speech S2 Pro exposes the OpenAI-compatible ``/v1/audio/speech``
+    endpoint. The reference vLLM-Omni recipe uses payload fields:
+    ``input``, ``voice``, and ``response_format``; optional voice cloning
+    fields ``ref_audio`` and ``ref_text`` are passed through when configured.
+    """
+    import requests
+
+    fish_config = tts_config.get("fish-speech", {})
+    base_url = str(
+        fish_config.get("base_url")
+        or get_env_value("FISH_SPEECH_BASE_URL")
+        or DEFAULT_FISH_SPEECH_BASE_URL
+    ).strip().rstrip("/")
+    if not base_url:
+        raise ValueError("Fish-Speech base_url is empty")
+
+    voice = str(fish_config.get("voice") or DEFAULT_FISH_SPEECH_VOICE).strip() or DEFAULT_FISH_SPEECH_VOICE
+    response_format = _fish_speech_response_format(
+        output_path,
+        fish_config.get("response_format"),
+    )
+    payload: Dict[str, Any] = {
+        "input": text,
+        "voice": voice,
+        "response_format": response_format,
+    }
+    # vLLM-Omni's Fish-Speech endpoint supports optional voice cloning when
+    # both reference audio and transcript are provided.
+    ref_audio, ref_text = _fish_speech_reference_voice_paths(fish_config)
+    if ref_audio and ref_text:
+        payload["ref_audio"] = ref_audio
+        payload["ref_text"] = ref_text
+
+    api_key = str(fish_config.get("api_key") or get_env_value("FISH_SPEECH_API_KEY") or "").strip()
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    timeout = fish_config.get("timeout", fish_config.get("timeout_seconds", 120))
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        timeout = 120.0
+
+    response = requests.post(
+        f"{base_url}/audio/speech",
+        headers=headers,
+        json=payload,
+        timeout=max(1.0, timeout),
+    )
+    response.raise_for_status()
+    if not response.content:
+        raise RuntimeError("Fish-Speech returned empty audio data")
+
+    with open(output_path, "wb") as f:
+        f.write(response.content)
+    return output_path
 
 
 # ===========================================================================
@@ -1911,6 +2055,14 @@ def text_to_speech_tool(
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
         elif want_opus and provider in {"openai", "elevenlabs", "mistral", "gemini"}:
             file_path = out_dir / f"tts_{timestamp}.ogg"
+        elif provider == "fish-speech":
+            fish_config = tts_config.get("fish-speech", {})
+            fmt = str(fish_config.get("response_format") or DEFAULT_FISH_SPEECH_RESPONSE_FORMAT).strip().lower().lstrip(".")
+            if fmt not in {"wav", "mp3", "opus", "ogg", "flac"}:
+                fmt = DEFAULT_FISH_SPEECH_RESPONSE_FORMAT
+            if fmt == "opus":
+                fmt = "ogg"
+            file_path = out_dir / f"tts_{timestamp}.{fmt}"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
 
@@ -1985,7 +2137,7 @@ def text_to_speech_tool(
                     "`mistralai` PyPI package was quarantined on 2026-05-12 "
                     "after a malicious 2.4.6 release. Switch tts.provider in "
                     "config.yaml to 'edge', 'elevenlabs', 'openai', 'minimax', "
-                    "'gemini', 'xai', 'neutts', or 'kittentts'. Mistral "
+                    "'gemini', 'xai', 'fish-speech', 'neutts', or 'kittentts'. Mistral "
                     "support will return once PyPI un-quarantines the package."
                 ),
             }, ensure_ascii=False)
@@ -1993,6 +2145,10 @@ def text_to_speech_tool(
         elif provider == "gemini":
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
+
+        elif provider == "fish-speech":
+            logger.info("Generating speech with Fish-Speech...")
+            _generate_fish_speech_tts(text, file_str, tts_config)
 
         elif provider == "neutts":
             if not _check_neutts_available():
@@ -2095,7 +2251,7 @@ def text_to_speech_tool(
                 voice_compatible = file_str.endswith(".ogg")
         elif (
             want_opus
-            and provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"}
+            and provider in {"edge", "neutts", "minimax", "xai", "fish-speech", "kittentts", "piper"}
             and not file_str.endswith(".ogg")
         ):
             opus_path = _convert_to_opus(file_str)
@@ -2155,6 +2311,14 @@ def check_tts_requirements() -> bool:
     # Any configured command provider counts as available.
     if _has_any_command_tts_provider():
         return True
+    # Fish-Speech is a local OpenAI-compatible HTTP server. If selected, keep
+    # the TTS tool visible; runtime errors will clearly report connection
+    # failures if the server is not actually listening.
+    try:
+        if _get_provider(_load_tts_config()) == "fish-speech":
+            return True
+    except Exception:
+        pass
     try:
         _import_edge_tts()
         return True

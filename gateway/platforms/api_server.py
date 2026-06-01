@@ -3383,6 +3383,17 @@ class APIServerAdapter(BasePlatformAdapter):
     # Agent execution
     # ------------------------------------------------------------------
 
+    def _end_api_agent_session(self, agent: Any, session_id: Optional[str], end_reason: str) -> None:
+        """Best-effort finalization for API-server sessions created by AIAgent."""
+        if not session_id:
+            return
+        try:
+            session_db = getattr(agent, "_session_db", None) or self._ensure_session_db()
+            if session_db is not None:
+                session_db.end_session(session_id, end_reason)
+        except Exception as exc:  # noqa: BLE001 - lifecycle finalization must not mask response handling
+            logger.debug("Failed to end API server session %s: %s", session_id, exc)
+
     async def _run_agent(
         self,
         user_message: str,
@@ -3422,23 +3433,30 @@ class APIServerAdapter(BasePlatformAdapter):
             if agent_ref is not None:
                 agent_ref[0] = agent
             effective_task_id = session_id or str(uuid.uuid4())
-            result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-                task_id=effective_task_id,
-            )
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
-            # Include the effective session ID in the result so callers
-            # (e.g. X-Hermes-Session-Id header) can track compression-
-            # triggered session rotations. (#16938)
-            _eff_sid = getattr(agent, "session_id", session_id)
-            if isinstance(_eff_sid, str) and _eff_sid:
-                result["session_id"] = _eff_sid
-            return result, usage
+            try:
+                result = agent.run_conversation(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    task_id=effective_task_id,
+                )
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                # Include the effective session ID in the result so callers
+                # (e.g. X-Hermes-Session-Id header) can track compression-
+                # triggered session rotations. (#16938)
+                _eff_sid = getattr(agent, "session_id", session_id)
+                if isinstance(_eff_sid, str) and _eff_sid:
+                    result["session_id"] = _eff_sid
+                self._end_api_agent_session(agent, _eff_sid, "api_complete")
+                return result, usage
+            except BaseException:
+                _eff_sid = getattr(agent, "session_id", session_id)
+                if isinstance(_eff_sid, str) and _eff_sid:
+                    self._end_api_agent_session(agent, _eff_sid, "api_error")
+                raise
 
         return await loop.run_in_executor(None, _run)
 

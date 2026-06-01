@@ -14,7 +14,7 @@ If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, 
 
 ## Text-to-Speech
 
-Convert text to speech with ten providers:
+Convert text to speech with eleven providers:
 
 | Provider | Quality | Cost | API Key |
 |----------|---------|------|---------|
@@ -24,6 +24,7 @@ Convert text to speech with ten providers:
 | **MiniMax TTS** | Excellent | Paid | `MINIMAX_API_KEY` |
 | **Mistral (Voxtral TTS)** | Excellent | Paid | `MISTRAL_API_KEY` |
 | **Google Gemini TTS** | Excellent | Free tier | `GEMINI_API_KEY` |
+| **Fish-Speech** | Excellent | Free (local server) | None needed |
 | **xAI TTS** | Excellent | Paid | `XAI_API_KEY` |
 | **NeuTTS** | Good | Free (local) | None needed |
 | **KittenTTS** | Good | Free (local) | None needed |
@@ -43,7 +44,7 @@ Convert text to speech with ten providers:
 ```yaml
 # In ~/.hermes/config.yaml
 tts:
-  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "mistral" | "gemini" | "xai" | "neutts" | "kittentts" | "piper"
+  provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "mistral" | "gemini" | "fish-speech" | "xai" | "neutts" | "kittentts" | "piper"
   speed: 1.0                    # Global speed multiplier (provider-specific settings override this)
   edge:
     voice: "en-US-AriaNeural"   # 322 voices, 74 languages
@@ -68,6 +69,14 @@ tts:
   gemini:
     model: "gemini-2.5-flash-preview-tts"  # or gemini-2.5-pro-preview-tts
     voice: "Kore"               # 30 prebuilt voices: Zephyr, Puck, Kore, Enceladus, Gacrux, etc.
+  fish-speech:
+    base_url: "http://192.168.0.41:8092/v1"  # vLLM-Omni server exposing /v1/audio/speech
+    voice: "default"
+    response_format: "wav"
+    reference_voices_dir: "~/.hermes/workspace/references_voices"
+    # reference_voice: "ナツメ"    # Optional folder under reference_voices_dir
+    # ref_audio: ""              # Optional URL/path for voice cloning (overrides reference_voice)
+    # ref_text: ""               # Transcript paired with ref_audio
   xai:
     voice_id: "eve"             # or a custom voice ID — see docs below
     language: "en"              # ISO 639-1 code
@@ -110,6 +119,7 @@ Each provider has a documented per-request input-character cap. Hermes truncates
 | MiniMax | 10000 |
 | Mistral | 4000 |
 | Google Gemini | 5000 |
+| Fish-Speech | 5000 |
 | ElevenLabs | Model-aware (see below) |
 | NeuTTS | 2000 |
 | KittenTTS | 2000 |
@@ -143,6 +153,7 @@ Telegram voice bubbles require Opus/OGG audio format:
 - **Edge TTS** (default) outputs MP3 and needs **ffmpeg** to convert:
 - **MiniMax TTS** outputs MP3 and needs **ffmpeg** to convert for Telegram voice bubbles
 - **Google Gemini TTS** outputs raw PCM and uses **ffmpeg** to encode Opus directly for Telegram voice bubbles
+- **Fish-Speech** outputs WAV by default and needs **ffmpeg** to convert for Telegram voice bubbles
 - **xAI TTS** outputs MP3 and needs **ffmpeg** to convert for Telegram voice bubbles
 - **NeuTTS** outputs WAV and also needs **ffmpeg** to convert for Telegram voice bubbles
 - **KittenTTS** outputs WAV and also needs **ffmpeg** to convert for Telegram voice bubbles
@@ -164,6 +175,26 @@ Without ffmpeg, Edge TTS, MiniMax TTS, NeuTTS, KittenTTS, and Piper audio are se
 :::tip
 If you want voice bubbles without installing ffmpeg, switch to the OpenAI, ElevenLabs, or Mistral provider.
 :::
+
+### Fish-Speech reference voices
+
+When `tts.provider: fish-speech`, Hermes can use local reference voices from `~/.hermes/workspace/references_voices`. Each voice must be a folder containing:
+
+- `merged_audio.mp3` — reference audio
+- `combined.lab` — transcript for that audio
+
+Run `hermes tools` / `hermes setup tools`, choose **Voice & TTS → Fish-Speech**, then pick one of the discovered reference voices. Hermes writes the selected folder into:
+
+```yaml
+tts:
+  provider: fish-speech
+  fish-speech:
+    reference_voice: "ナツメ"
+    ref_audio: "~/.hermes/workspace/references_voices/ナツメ/merged_audio.mp3"
+    ref_text: "~/.hermes/workspace/references_voices/ナツメ/combined.lab"
+```
+
+You can also set `reference_voice` manually; explicit `ref_audio` / `ref_text` override the named voice.
 
 ### xAI Custom Voices (voice cloning)
 

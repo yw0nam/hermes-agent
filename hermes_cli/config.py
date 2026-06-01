@@ -1281,9 +1281,9 @@ DEFAULT_CONFIG = {
     # Each provider supports an optional `max_text_length:` override for the
     # per-request input-character cap. Omit it to use the provider's documented
     # limit (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k model-aware,
-    # Gemini 5000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
+    # Gemini/Fish-Speech 5000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
     "tts": {
-        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "neutts" (local) | "kittentts" (local) | "piper" (local)
+        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "fish-speech" (local server) | "neutts" (local) | "kittentts" (local) | "piper" (local)
         "edge": {
             "voice": "en-US-AriaNeural",
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
@@ -1302,6 +1302,17 @@ DEFAULT_CONFIG = {
             "language": "en",
             "sample_rate": 24000,
             "bit_rate": 128000,
+        },
+        "fish-speech": {
+            # vLLM-Omni Fish-Speech server exposing /v1/audio/speech.
+            # Example: vllm serve fishaudio/s2-pro --omni --port 8092
+            "base_url": "http://192.168.0.41:8092/v1",
+            "voice": "default",
+            "response_format": "wav",
+            "reference_voices_dir": "~/.hermes/workspace/references_voices",
+            # "reference_voice": "",  # Optional folder name under reference_voices_dir
+            # "ref_audio": "",  # Optional URL/path for voice cloning (overrides reference_voice)
+            # "ref_text": "",   # Required with ref_audio for voice cloning
         },
         "mistral": {
             "model": "voxtral-mini-tts-2603",

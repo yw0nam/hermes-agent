@@ -257,6 +257,13 @@ TOOL_CATEGORIES = {
                 "tts_provider": "gemini",
             },
             {
+                "name": "Fish-Speech",
+                "badge": "local · free",
+                "tag": "Local vLLM-Omni Fish-Speech server on port 8092; can use reference voices",
+                "env_vars": [],
+                "tts_provider": "fish-speech",
+            },
+            {
                 "name": "KittenTTS",
                 "badge": "local · free",
                 "tag": "Lightweight local ONNX TTS (~25MB), no API key",
@@ -1470,6 +1477,74 @@ def _prompt_choice(question: str, choices: list, default: int = 0) -> int:
     return curses_radiolist(question, choices, selected=default, cancel_returns=default)
 
 
+def _fish_speech_reference_voices_dir(config: dict) -> Path:
+    tts_cfg = config.get("tts", {}) if isinstance(config.get("tts", {}), dict) else {}
+    fish_cfg = tts_cfg.get("fish-speech", {}) if isinstance(tts_cfg.get("fish-speech", {}), dict) else {}
+    return Path(
+        str(
+            fish_cfg.get("reference_voices_dir")
+            or "~/.hermes/workspace/references_voices"
+        )
+    ).expanduser()
+
+
+def _fish_speech_reference_voice_options(config: dict) -> list[dict]:
+    """Return selectable Fish-Speech reference voices from references_voices."""
+    voices_dir = _fish_speech_reference_voices_dir(config)
+    if not voices_dir.exists() or not voices_dir.is_dir():
+        return []
+
+    options = []
+    for voice_dir in sorted((p for p in voices_dir.iterdir() if p.is_dir()), key=lambda p: p.name):
+        audio = voice_dir / "merged_audio.mp3"
+        transcript = voice_dir / "combined.lab"
+        if audio.exists() and transcript.exists():
+            options.append({
+                "name": voice_dir.name,
+                "ref_audio": str(audio),
+                "ref_text": str(transcript),
+            })
+    return options
+
+
+def _configure_fish_speech_reference_voice(config: dict) -> None:
+    """Prompt for a Fish-Speech reference voice and write ref_audio/ref_text."""
+    options = _fish_speech_reference_voice_options(config)
+    tts_cfg = config.setdefault("tts", {})
+    fish_cfg = tts_cfg.setdefault("fish-speech", {})
+    if not isinstance(fish_cfg, dict):
+        fish_cfg = {}
+        tts_cfg["fish-speech"] = fish_cfg
+
+    if not options:
+        _print_warning(f"  No Fish-Speech reference voices found in {_fish_speech_reference_voices_dir(config)}")
+        _print_info("  Add folders with merged_audio.mp3 and combined.lab, or set tts.fish-speech.ref_audio/ref_text manually.")
+        return
+
+    current_voice = str(fish_cfg.get("reference_voice") or fish_cfg.get("voice_reference") or "").strip()
+    default_idx = 0
+    choices = ["Default voice — do not use a reference voice"]
+    for idx, option in enumerate(options, start=1):
+        suffix = "  ← currently in use" if option["name"] == current_voice else ""
+        if suffix:
+            default_idx = idx
+        choices.append(f"{option['name']}{suffix}")
+
+    print()
+    idx = _prompt_choice("  Choose Fish-Speech reference voice:", choices, default_idx)
+    if idx == 0:
+        for key in ("reference_voice", "voice_reference", "ref_audio", "ref_text"):
+            fish_cfg.pop(key, None)
+        _print_success("  Fish-Speech reference voice cleared")
+        return
+
+    chosen = options[idx - 1]
+    fish_cfg["reference_voice"] = chosen["name"]
+    fish_cfg["ref_audio"] = chosen["ref_audio"]
+    fish_cfg["ref_text"] = chosen["ref_text"]
+    _print_success(f"  Fish-Speech reference voice set to: {chosen['name']}")
+
+
 # ─── Token Estimation ────────────────────────────────────────────────────────
 
 # Module-level cache so discovery + tokenization runs at most once per process.
@@ -2547,6 +2622,8 @@ def _configure_provider(
         tts_cfg = config.setdefault("tts", {})
         tts_cfg["provider"] = provider["tts_provider"]
         tts_cfg["use_gateway"] = bool(managed_feature)
+        if provider["tts_provider"] == "fish-speech":
+            _configure_fish_speech_reference_voice(config)
 
     # Set browser cloud provider in config if applicable
     if "browser_provider" in provider:
