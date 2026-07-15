@@ -267,6 +267,85 @@ async def test_session_compress_rotates_and_rewrites_tip(adapter, session_db, mo
 
 
 @pytest.mark.asyncio
+async def test_session_compress_preserves_archived_rows_for_in_place_compaction(adapter, session_db, monkeypatch):
+    session_id = session_db.create_session("api-compress-in-place", "api_server")
+    original = [
+        ("user", "first question"), ("assistant", "first answer"),
+        ("user", "second question"), ("assistant", "second answer"),
+    ]
+    for role, content in original:
+        session_db.append_message(session_id, role, content)
+
+    class FakeCompressor:
+        def has_content_to_compress(self, messages):
+            return True
+
+    class FakeAgent:
+        session_prompt_tokens = session_completion_tokens = session_total_tokens = 0
+        _cached_system_prompt = ""
+        tools = None
+        context_compressor = FakeCompressor()
+
+        def __init__(self, session_id):
+            self.session_id = session_id
+            self._last_compaction_in_place = False
+
+        def _compress_context(self, messages, system_message, **kwargs):
+            compacted = [{"role": "user", "content": "compressed summary"}]
+            session_db.archive_and_compact(self.session_id, compacted)
+            self._last_compaction_in_place = True
+            return compacted, None
+
+    monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: FakeAgent(kwargs["session_id"]))
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(f"/api/sessions/{session_id}/compress", json={})
+        assert resp.status == 200
+        payload = await resp.json()
+
+    assert payload["status"] == "compressed"
+    assert payload["session_id"] == session_id
+    assert session_db.has_archived_messages(session_id)
+    assert [m["content"] for m in session_db.get_messages(session_id)] == ["compressed summary"]
+    assert {m["content"] for m in session_db.get_messages(session_id, include_inactive=True)} >= {
+        "first question", "first answer", "second question", "second answer", "compressed summary",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_compress_skips_when_compressor_makes_no_progress(adapter, session_db, monkeypatch):
+    session_id = session_db.create_session("api-compress-no-progress", "api_server")
+    for role, content in [("user", "one"), ("assistant", "two"), ("user", "three"), ("assistant", "four")]:
+        session_db.append_message(session_id, role, content)
+
+    class FakeCompressor:
+        def has_content_to_compress(self, messages):
+            return True
+
+    class FakeAgent:
+        _cached_system_prompt = ""
+        tools = None
+        context_compressor = FakeCompressor()
+
+        def __init__(self, session_id):
+            self.session_id = session_id
+
+        def _compress_context(self, messages, system_message, **kwargs):
+            return messages, None
+
+    monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: FakeAgent(kwargs["session_id"]))
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(f"/api/sessions/{session_id}/compress", json={})
+        assert resp.status == 200
+        payload = await resp.json()
+
+    assert payload["status"] == "skipped"
+    assert payload["reason"] == "no_progress"
+    assert [m["content"] for m in session_db.get_messages(session_id)] == ["one", "two", "three", "four"]
+
+
+@pytest.mark.asyncio
 async def test_session_compress_skips_short_history(adapter, session_db, monkeypatch):
     session_id = session_db.create_session("short-session", "api_server")
     session_db.append_message(session_id, "user", "hello")
@@ -342,7 +421,11 @@ async def test_session_chat_loads_history_and_preserves_session_headers(auth_ada
     assert kwargs["session_id"] == session_id
     assert kwargs["gateway_session_key"] == "client-42"
     assert kwargs["ephemeral_system_prompt"] == "stay focused"
-    assert kwargs["conversation_history"] == [
+    history = kwargs["conversation_history"]
+    assert len(history) == 2
+    assert isinstance(history[0].pop("timestamp"), (int, float))
+    assert isinstance(history[1].pop("timestamp"), (int, float))
+    assert history == [
         {"role": "user", "content": "earlier"},
         {"role": "assistant", "content": "prior answer"},
     ]
