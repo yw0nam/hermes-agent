@@ -3292,6 +3292,9 @@ class APIServerAdapter(BasePlatformAdapter):
             if conversation_history_snapshot is None:
                 conversation_history_snapshot = list(conversation_history)
                 conversation_history_snapshot.append({"role": "user", "content": user_message})
+            conversation_history_snapshot = _prune_history_images(
+                conversation_history_snapshot, self._max_history_images
+            )
             self._response_store.put(response_id, {
                 "response": response_env,
                 "conversation_history": conversation_history_snapshot,
@@ -3859,6 +3862,7 @@ class APIServerAdapter(BasePlatformAdapter):
             if stored is None:
                 return web.json_response(_openai_error(f"Previous response not found: {previous_response_id}"), status=404)
             conversation_history = list(stored.get("conversation_history", []))
+            conversation_history = _prune_history_images(conversation_history, self._max_history_images)
             stored_session_id = stored.get("session_id")
             # If no instructions provided, carry forward from previous
             if instructions is None:
@@ -4040,6 +4044,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Store the complete response object for future chaining / GET retrieval
         if store:
+            full_history = _prune_history_images(full_history, self._max_history_images)
             self._response_store.put(response_id, {
                 "response": response_data,
                 "conversation_history": full_history,
